@@ -239,7 +239,7 @@ def main():
 
     print("Length of mel chunks: {}".format(len(mel_chunks)))
 
-    full_frames = full_frames[:len(mel_chunks)]
+    # full_frames = full_frames[:len(mel_chunks)]
 
     batch_size = args.wav2lip_batch_size
 
@@ -247,13 +247,13 @@ def main():
 
     if args.box[0] == -1:
         if not args.static:
-            face_det_results = face_detect(full_frames_copy)  # BGR2RGB for CNN face detection
+            face_det_results = face_detect(full_frames_copy)[:len(mel_chunks)]  # BGR2RGB for CNN face detection
         else:
             face_det_results = face_detect([full_frames_copy[0]])
     else:
         print('Using the specified bounding box instead of face detection...')
         y1, y2, x1, x2 = args.box
-        face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in full_frames_copy]
+        face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in full_frames_copy[:len(mel_chunks)]]
 
     gen = datagen(full_frames_copy, mel_chunks, face_det_results)
 

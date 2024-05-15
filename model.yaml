@@ -1,11 +1,14 @@
 tts:
   speed: 0.8
-  output_dir: outputs_v2
+  output_dir: results
   reference_speaker: resources/example_reference.mp3
   ckpt_speakers: checkpoints/tts/base_speakers/ses
   ckpt_converter: checkpoints/tts/converter
+  ckpt_tts: checkpoints/tts
 wav2lip:
   # Name of saved checkpoint to load weights from
   ckpt: checkpoints/wav2lip_gan.pth
   # Filepath of video/image that contains faces to use
   face: resources/example_reference.mp4
+web:
+  port: 5000

@@ -1,9 +1,15 @@
 import os
-import torch, face_detection
+
+import cv2
 import numpy as np
-from models import Wav2Lip
+import torch
+import yaml
 from tqdm import tqdm
-import cv2, os, sys, audio, yaml, wav2lip_configuration
+
+import face_detection
+import wav2lip_configuration
+from models import Wav2Lip
+from web import Web
 
 # 环境变量需要在引入huggingface相关库之前设置
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
@@ -13,27 +19,31 @@ from melo.api import TTS
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-model_config = {}
-tone_color_converter = None
-tts_model = None
-speaker_id = None
+config: dict
+tone_color_converter: ToneColorConverter
+tts_model: TTS
+source_se: torch.Tensor
+target_se: torch.Tensor
+speaker_id: str
 img_size = 96
-face_det_results = None
-wav2lip_model = None
+full_frames: list
+face_det_results: list
+wav2lip_model: Wav2Lip
 
 
 def load_from_yaml():
-    global model_config
+    global config
     with open('model.yaml', mode='r') as file:
-        model_config = yaml.safe_load(file)
-    for config in wav2lip_configuration.DefaultConfig:
-        if config.name not in model_config['wav2lip']:
-            model_config['wav2lip'][config.name] = config.value
+        config = yaml.safe_load(file)
+    for key in wav2lip_configuration.default_config.keys():
+        if key not in config['wav2lip']:
+            config['wav2lip'][key] = wav2lip_configuration.default_config[key]
+    config['wav2lip']['image_size'] = img_size
 
 
 def load_tts_model():
-    global model_config, tone_color_converter, tts_model, speaker_id
-    tts_config = model_config['tts']
+    global config, tone_color_converter, tts_model, source_se, target_se, speaker_id
+    tts_config = config['tts']
     os.makedirs(tts_config['output_dir'], exist_ok=True)
     tone_color_converter = ToneColorConverter(
         f"{tts_config['ckpt_converter']}/config.json", device=device
@@ -42,12 +52,13 @@ def load_tts_model():
     reference_speaker = (
         tts_config['reference_speaker']  # This is the voice you want to clone
     )
-    target_se, audio_name = se_extractor.get_se(
+    target_se, _ = se_extractor.get_se(
         reference_speaker, tone_color_converter, vad=False
     )
     # 音频输出路径
     src_path = f"{tts_config['output_dir']}/tmp.wav"
-    tts_model = TTS(language="ZH", device=device)
+    tts_model = TTS(language="ZH", device=device, ckpt_path=f"{tts_config['ckpt_tts']}/checkpoint.pth",
+                    config_path=f"{tts_config['ckpt_tts']}/config.json")
     speaker_ids = tts_model.hps.data.spk2id
 
     speaker_key = list(speaker_ids.keys())[0]
@@ -135,7 +146,8 @@ def face_detect(images, wav2lip_config):
         results.append([x1, y1, x2, y2])
 
     boxes = np.array(results)
-    if not wav2lip_config['nosmooth']: boxes = get_smoothened_boxes(boxes, T=5)
+    if not wav2lip_config['nosmooth']:
+        boxes = get_smoothened_boxes(boxes, T=5)
     results = [[image[y1: y2, x1:x2], (y1, y2, x1, x2)] for image, (x1, y1, x2, y2) in zip(images, boxes)]
 
     del detector
@@ -143,8 +155,8 @@ def face_detect(images, wav2lip_config):
 
 
 def load_wav2lip_model():
-    global model_config
-    wav2lip_config = model_config['wav2lip']
+    global config, full_frames
+    wav2lip_config = config['wav2lip']
     if os.path.isfile(wav2lip_config['face']) and wav2lip_config['face'].split('.')[1] in ['jpg', 'png', 'jpeg']:
         wav2lip_config['static'] = True
 
@@ -153,11 +165,10 @@ def load_wav2lip_model():
 
     elif wav2lip_config['face'].split('.')[1] in ['jpg', 'png', 'jpeg']:
         full_frames = [cv2.imread(wav2lip_config['face'])]
-        fps = wav2lip_config['fps']
 
     else:
         video_stream = cv2.VideoCapture(wav2lip_config['face'])
-        fps = video_stream.get(cv2.CAP_PROP_FPS)
+        wav2lip_config['fps'] = video_stream.get(cv2.CAP_PROP_FPS)
 
         print('Reading video frames...')
 
@@ -182,7 +193,6 @@ def load_wav2lip_model():
                 y2 = frame.shape[0]
 
             frame = frame[y1:y2, x1:x2]
-
             full_frames.append(frame)
 
     print("Number of frames available for inference: " + str(len(full_frames)))
@@ -202,10 +212,12 @@ def load_wav2lip_model():
     wav2lip_model = load_model(wav2lip_config['ckpt'])
     print("Model loaded")
 
-    frame_h, frame_w = full_frames[0].shape[:-1]
-
 
 if __name__ == '__main__':
     load_from_yaml()
     load_tts_model()
     load_wav2lip_model()
+    global tone_color_converter, tts_model, source_se, target_se, wav2lip_model, full_frames, face_det_results, config
+    web = Web(tone_color_converter, tts_model, source_se, target_se, wav2lip_model, full_frames, face_det_results,
+              config)
+    web.start()

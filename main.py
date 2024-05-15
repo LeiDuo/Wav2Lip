@@ -18,31 +18,20 @@ from openvoice.api import ToneColorConverter
 from melo.api import TTS
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
-
-config: dict
-tone_color_converter: ToneColorConverter
-tts_model: TTS
-source_se: torch.Tensor
-target_se: torch.Tensor
-speaker_id: str
 img_size = 96
-full_frames: list
-face_det_results: list
-wav2lip_model: Wav2Lip
 
 
-def load_from_yaml():
-    global config
+def load_from_yaml() -> dict:
     with open('model.yaml', mode='r') as file:
         config = yaml.safe_load(file)
     for key in wav2lip_configuration.default_config.keys():
         if key not in config['wav2lip']:
             config['wav2lip'][key] = wav2lip_configuration.default_config[key]
     config['wav2lip']['image_size'] = img_size
+    return config
 
 
-def load_tts_model():
-    global config, tone_color_converter, tts_model, source_se, target_se, speaker_id
+def load_tts_model(config: dict) -> (ToneColorConverter, TTS, torch.Tensor, torch.Tensor):
     tts_config = config['tts']
     os.makedirs(tts_config['output_dir'], exist_ok=True)
     tone_color_converter = ToneColorConverter(
@@ -76,6 +65,7 @@ def load_tts_model():
         tgt_se=target_se,
         output_path=save_path
     )
+    return tone_color_converter, tts_model, source_se, target_se
 
 
 def load_model(path):
@@ -154,8 +144,7 @@ def face_detect(images, wav2lip_config):
     return results
 
 
-def load_wav2lip_model():
-    global config, full_frames
+def load_wav2lip_model(config: dict) -> (Wav2Lip, list, list):
     wav2lip_config = config['wav2lip']
     if os.path.isfile(wav2lip_config['face']) and wav2lip_config['face'].split('.')[1] in ['jpg', 'png', 'jpeg']:
         wav2lip_config['static'] = True
@@ -198,7 +187,6 @@ def load_wav2lip_model():
     print("Number of frames available for inference: " + str(len(full_frames)))
 
     full_frames_copy = full_frames.copy()
-    global face_det_results, wav2lip_model
     if wav2lip_config['box'][0] == -1:
         if not wav2lip_config['static']:
             face_det_results = face_detect(full_frames_copy, wav2lip_config)  # BGR2RGB for CNN face detection
@@ -211,13 +199,13 @@ def load_wav2lip_model():
 
     wav2lip_model = load_model(wav2lip_config['ckpt'])
     print("Model loaded")
+    return wav2lip_model, full_frames, face_det_results
 
 
 if __name__ == '__main__':
-    load_from_yaml()
-    load_tts_model()
-    load_wav2lip_model()
-    global tone_color_converter, tts_model, source_se, target_se, wav2lip_model, full_frames, face_det_results, config
-    web = Web(tone_color_converter, tts_model, source_se, target_se, wav2lip_model, full_frames, face_det_results,
-              config)
+    config_m = load_from_yaml()
+    tone_color_converter_m, tts_model_m, source_se_m, target_se_m = load_tts_model(config_m)
+    wav2lip_model_m, full_frames_m, face_det_results_m = load_wav2lip_model(config_m)
+    web = Web(tone_color_converter_m, tts_model_m, source_se_m, target_se_m, wav2lip_model_m, full_frames_m,
+              face_det_results_m, config_m)
     web.start()

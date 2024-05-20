@@ -61,14 +61,16 @@ def ffmpeg_pre_process(command: list, fps: int):
     make_pipe()
     _ = run_ffmpeg(command)
     global fd_v, fd_a, video_pipe_name, audio_pipe_name, v_full_idle, a_full_idle
+    if fd_v is None:
+        fd_v = os.open(video_pipe_name, os.O_APPEND)
+    if fd_a is None:
+        fd_a = os.open(audio_pipe_name, os.O_APPEND)
     Thread(target=write_idle, args=(fps, fd_v, video_pipe_name, v_full_idle)).start()
     Thread(target=write_idle, args=(fps, fd_v, audio_pipe_name, a_full_idle)).start()
 
 
 def write_idle(fps: int, fd: int, pipe_name: str, full_idle: np.ndarray):
     global access
-    if fd is None:
-        fd = os.open(pipe_name, os.O_APPEND)
     while True:
         if access is False:
             time.sleep(0.1)

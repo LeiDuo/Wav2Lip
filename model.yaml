@@ -12,3 +12,4 @@ wav2lip:
   face: resources/example_reference.mp4
 web:
   port: 5000
+  push_url: "rtsp://127.0.0.1:8554/humanlive"

@@ -9,10 +9,11 @@ from tqdm import tqdm
 import face_detection
 import wav2lip_configuration
 from models import Wav2Lip
-from web import Web
 
 # 环境变量需要在引入huggingface相关库之前设置
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
+from web import Web
 from openvoice import se_extractor
 from openvoice.api import ToneColorConverter
 from melo.api import TTS
@@ -27,7 +28,7 @@ def load_from_yaml() -> dict:
     for key in wav2lip_configuration.default_config.keys():
         if key not in config['wav2lip']:
             config['wav2lip'][key] = wav2lip_configuration.default_config[key]
-    config['wav2lip']['image_size'] = img_size
+    config['wav2lip']['img_size'] = img_size
     return config
 
 

@@ -1,6 +1,9 @@
+import base64
 import os
+import platform
 import subprocess
 import time
+import json
 from threading import Thread
 
 import cv2
@@ -11,75 +14,64 @@ from gevent.pywsgi import WSGIServer
 from melo.api import TTS
 from openvoice.api import ToneColorConverter
 
-import audio
 from models import Wav2Lip
+from web import tools
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 video_pipe_name = "video_pipe"
 audio_pipe_name = "audio_pipe"
-fd_v: int
-fd_a: int
+fd_v = -1
+fd_a = -1
 v_full_idle: np.ndarray
 a_full_idle: np.ndarray
 access = True
-
-
-def datagen(frames, mels, face_det_results, config: dict):
-    img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
-
-    for i, m in enumerate(mels):
-        idx = 0 if config['static'] else i % len(frames)
-        frame_to_save = frames[idx].copy()
-        face, coords = face_det_results[idx].copy()
-
-        face = cv2.resize(face, (config['img_size'], config['img_size']))
-
-        img_batch.append(face)
-        mel_batch.append(m)
-        frame_batch.append(frame_to_save)
-        coords_batch.append(coords)
-
-        if len(img_batch) >= config['wav2lip_batch_size']:
-            img_batch, mel_batch = np.asarray(img_batch), np.asarray(mel_batch)
-            img_masked = img_batch.copy()
-            img_masked[:, config['img_size'] // 2:] = 0
-            img_batch = np.concatenate((img_masked, img_batch), axis=3) / 255.
-            mel_batch = np.reshape(mel_batch, [len(mel_batch), mel_batch.shape[1], mel_batch.shape[2], 1])
-            yield img_batch, mel_batch, frame_batch, coords_batch
-            img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
-
-    if len(img_batch) > 0:
-        img_batch, mel_batch = np.asarray(img_batch), np.asarray(mel_batch)
-        img_masked = img_batch.copy()
-        img_masked[:, config['img_size'] // 2:] = 0
-        img_batch = np.concatenate((img_masked, img_batch), axis=3) / 255.
-        mel_batch = np.reshape(mel_batch, [len(mel_batch), mel_batch.shape[1], mel_batch.shape[2], 1])
-        yield img_batch, mel_batch, frame_batch, coords_batch
+sync_difference = 0
 
 
 def ffmpeg_pre_process(command: list, fps: int):
     make_pipe()
     _ = run_ffmpeg(command)
-    global fd_v, fd_a, video_pipe_name, audio_pipe_name, v_full_idle, a_full_idle
-    if fd_v is None:
-        fd_v = os.open(video_pipe_name, os.O_APPEND)
-    if fd_a is None:
-        fd_a = os.open(audio_pipe_name, os.O_APPEND)
-    Thread(target=write_idle, args=(fps, fd_v, video_pipe_name, v_full_idle)).start()
-    Thread(target=write_idle, args=(fps, fd_v, audio_pipe_name, a_full_idle)).start()
+    Thread(target=write_video_idle, args=(fps,)).start()
+    Thread(target=write_audio_idle, args=(fps,)).start()
 
 
-def write_idle(fps: int, fd: int, pipe_name: str, full_idle: np.ndarray):
-    global access
+# noinspection DuplicatedCode
+def write_video_idle(fps: int):
+    global fd_v, access, sync_difference
+    if fd_v == -1:
+        fd_v = os.open(video_pipe_name, os.O_WRONLY)
     while True:
         if access is False:
-            time.sleep(0.1)
+            time.sleep(1 / fps)
         else:
             t0 = time.time()
             for _ in range(fps):
                 if access is False:
                     break
-                os.write(fd, full_idle.tobytes())
+                sync_difference += 1
+                os.write(fd_v, v_full_idle.tobytes())
+            try:
+                print(sync_difference)
+                time.sleep(1 - time.time() + t0)
+            except ValueError:
+                ...
+
+
+# noinspection DuplicatedCode
+def write_audio_idle(fps: int):
+    global fd_a, access, sync_difference
+    if fd_a == -1:
+        fd_a = os.open(audio_pipe_name, os.O_WRONLY)
+    while True:
+        if access is False:
+            time.sleep(1 / fps)
+        else:
+            t0 = time.time()
+            for _ in range(fps):
+                if access is False:
+                    break
+                sync_difference -= 1
+                os.write(fd_a, a_full_idle.tobytes())
             try:
                 time.sleep(1 - time.time() + t0)
             except ValueError:
@@ -118,6 +110,14 @@ def write_audio(wav_array: np.ndarray, fps: int):
             break
 
 
+def batch_eval(img_batch, mel_batch, wav2lip_model: Wav2Lip):
+    img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
+    mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
+    with torch.no_grad():
+        pred = wav2lip_model(mel_batch, img_batch)
+    return pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
+
+
 class Web:
     def __init__(self, converter: ToneColorConverter, tts_model: TTS, source_se: torch.Tensor, target_se: torch.Tensor,
                  wav2lip_model: Wav2Lip, full_frames: list, face_det_results: list, config: dict):
@@ -130,44 +130,6 @@ class Web:
         self.full_frames = full_frames
         self.face_det_results = face_det_results
         self.frame_h, self.frame_w = full_frames[0].shape[:-1]
-        self.command = [
-            "ffmpeg",
-            "-loglevel",
-            "info",
-            "-y",
-            "-an",
-            "-f",
-            "rawvideo",
-            "-vcodec",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-s",
-            "{}x{}".format(self.frame_w, self.frame_h),
-            "-r",
-            str(config['wav2lip']['fps']),
-            "-i",
-            video_pipe_name,  # 视频流管道作为输入
-            "-i",
-            audio_pipe_name,  # 音频流管道作为输入
-            "-c:v",
-            "libx264",
-            "-s",
-            "{}x{}".format(self.frame_w, self.frame_h),
-            "-r",
-            str(config['wav2lip']['fps']),
-            "-ac",
-            "1",
-            "-ar",
-            "44100",
-            "-f",
-            "rtsp",
-            config['web']['push_url'],
-        ]
-        global v_full_idle, a_full_idle
-        v_full_idle = self.full_frames[0]
-        a_full_idle = (torch.full((int(44100 / config['wav2lip']['fps']),), 0)
-                       .detach().cpu().numpy().astype(np.int16))
         self.config = config
 
     def start(self):
@@ -181,54 +143,72 @@ class Web:
         src_path = f"{tts_config['output_dir']}/tmp.wav"
         wav_save_path = f"{tts_config['output_dir']}/output_v2_{speaker_key}.wav"
         mel_step_size = 16
-        ffmpeg_pre_process(self.command, wav2lip_config['fps'])
 
         @app.route('/')
         def hello_world():
             return 'Hello, World!'
 
-        @app.route('/text/<text>')
-        def text2lip(text):
-            self.tts_model.tts_to_file(text, speaker_id, src_path,
-                                       speed=tts_config['speed'])
-            self.converter.convert(
-                audio_src_path=src_path,
-                src_se=self.source_se,
-                tgt_se=self.target_se,
-                output_path=wav_save_path
-            )
-            wav = audio.load_wav(wav_save_path, 44100)
-            mel = audio.melspectrogram(wav)
-            print(mel.shape)
-            if np.isnan(mel.reshape(-1)).sum() > 0:
-                raise ValueError(
-                    'Mel contains nan! Using a TTS voice? Add a small epsilon noise to the wav file and try again')
-            mel_chunks = []
-            mel_idx_multiplier = 80. / wav2lip_config['fps']
-            i = 0
-            while 1:
-                start_idx = int(i * mel_idx_multiplier)
-                if start_idx + mel_step_size > len(mel[0]):
-                    mel_chunks.append(mel[:, len(mel[0]) - mel_step_size:])
-                    break
-                mel_chunks.append(mel[:, start_idx: start_idx + mel_step_size])
-                i += 1
-            print("Length of mel chunks: {}".format(len(mel_chunks)))
+        @app.route('/start_live')
+        def start_live():
+            self.command = [
+                "ffmpeg",
+                "-loglevel",
+                "info",
+                "-y",
+                "-an",
+                "-f",
+                "rawvideo",
+                "-vcodec",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                "{}x{}".format(self.frame_w, self.frame_h),
+                # "-r",
+                # str(config['wav2lip']['fps']),
+                "-i",
+                video_pipe_name,  # 视频流管道作为输入
+                "-f",
+                "s16le",
+                "-acodec",
+                "pcm_s16le",
+                "-i",
+                audio_pipe_name,  # 音频流管道作为输入
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-s",
+                "{}x{}".format(self.frame_w, self.frame_h),
+                "-r",
+                str(self.config['wav2lip']['fps']),
+                "-ac",
+                "1",
+                "-ar",
+                "44100",
+                '-acodec',
+                'aac',
+                "-f",
+                "rtsp",
+                self.config['web']['push_url'],
+            ]
+            global v_full_idle, a_full_idle
+            v_full_idle = self.full_frames[0]
+            a_full_idle = (torch.full((int(44100 / self.config['wav2lip']['fps']),), 0)
+                           .detach().cpu().numpy().astype(np.int16))
+            ffmpeg_pre_process(self.command, int(wav2lip_config['fps']))
 
-            if wav2lip_config['box'][0] == -1 and wav2lip_config['static'] is True:
-                face_det_results_seg = self.face_det_results[0]
-            else:
-                face_det_results_seg = self.face_det_results[:len(mel_chunks)]
-            gen = datagen(self.full_frames, mel_chunks, face_det_results_seg, wav2lip_config)
+        @app.route('/text_live/<text>')
+        def text2lip_live(text):
+            tools.text2wav(self.tts_model, self.converter, text, tts_config, speaker_id, src_path, self.source_se,
+                           self.target_se, wav_save_path)
+            wav, gen = tools.wav2lip_pre(wav_save_path, wav2lip_config, mel_step_size, self.full_frames,
+                                         self.face_det_results)
             global fd_v, fd_a, access
             access = False
             Thread(target=write_audio, args=(wav, wav2lip_config['fps'])).start()
             for (img_batch, mel_batch, frames, coords) in gen:
-                img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
-                mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
-                with torch.no_grad():
-                    pred = self.wav2lip_model(mel_batch, img_batch)
-                pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
+                pred = batch_eval(img_batch, mel_batch, self.wav2lip_model)
 
                 for p, f, c in zip(pred, frames, coords):
                     y1, y2, x1, x2 = c
@@ -237,6 +217,35 @@ class Web:
                     os.write(fd_v, f.tobytes())
             access = True
             return "okay!"
+
+        @app.route('/text_file/<text>')
+        def text2lip_file(text):
+            tools.text2wav(self.tts_model, self.converter, text, tts_config, speaker_id, src_path, self.source_se,
+                           self.target_se, wav_save_path)
+            _, gen = tools.wav2lip_pre(wav_save_path, wav2lip_config, mel_step_size, self.full_frames,
+                                       self.face_det_results)
+            out = cv2.VideoWriter('temp/result.avi',
+                                  cv2.VideoWriter_fourcc(*'DIVX'), wav2lip_config['fps'], (self.frame_w, self.frame_h))
+            for (img_batch, mel_batch, frames, coords) in gen:
+                pred = batch_eval(img_batch, mel_batch, self.wav2lip_model)
+
+                for p, f, c in zip(pred, frames, coords):
+                    y1, y2, x1, x2 = c
+                    p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
+                    f[y1:y2, x1:x2] = p
+                    out.write(f)
+            out.release()
+            out_dir = f"{wav2lip_config['output_dir']}/output_{speaker_key}.mp4"
+            command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {}'.format(wav_save_path, 'temp/result.avi', out_dir)
+            subprocess.call(command, shell=platform.system() != 'Windows')
+            with open(out_dir, 'rb') as f:
+                video_data = base64.b64encode(f.read()).decode()
+
+            data = {
+                'video': 'data:video/mp4;base64,%s' % video_data,
+            }
+            json_data = json.dumps(data)
+            return json_data
 
         self.server = WSGIServer(('', self.config['web']['port']), app)
         self.server.serve_forever()

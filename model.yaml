@@ -10,6 +10,7 @@ wav2lip:
   ckpt: checkpoints/wav2lip_gan.pth
   # Filepath of video/image that contains faces to use
   face: resources/example_reference.mp4
+  output_dir: results
 web:
   port: 5000
   push_url: "rtsp://127.0.0.1:8554/humanlive"

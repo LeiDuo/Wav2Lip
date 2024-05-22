@@ -38,6 +38,7 @@ def load_tts_model(config: dict) -> (ToneColorConverter, TTS, torch.Tensor, torc
     tone_color_converter = ToneColorConverter(
         f"{tts_config['ckpt_converter']}/config.json", device=device
     )
+    tone_color_converter.watermark_model = None
     tone_color_converter.load_ckpt(f"{tts_config['ckpt_converter']}/checkpoint.pth")
     reference_speaker = (
         tts_config['reference_speaker']  # This is the voice you want to clone

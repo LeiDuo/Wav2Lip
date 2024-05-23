@@ -12,6 +12,8 @@ import torch
 from flask import Flask
 from gevent.pywsgi import WSGIServer
 from melo.api import TTS
+from moviepy.audio.AudioClip import AudioArrayClip
+from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from openvoice.api import ToneColorConverter
 
 from models import Wav2Lip
@@ -182,12 +184,10 @@ class Web:
                 "{}x{}".format(self.frame_w, self.frame_h),
                 "-r",
                 str(self.config['wav2lip']['fps']),
-                "-ac",
-                "1",
-                "-ar",
-                "44100",
-                '-acodec',
-                'aac',
+                "-c:a",
+                "aac",
+                # "-ar",
+                # "44100",
                 "-f",
                 "rtsp",
                 self.config['web']['push_url'],
@@ -246,6 +246,25 @@ class Web:
             }
             json_data = json.dumps(data)
             return json_data
+
+        @app.route('/text_stream/<text>')
+        def text2lip_stream(text):
+            tools.text2wav(self.tts_model, self.converter, text, tts_config, speaker_id, src_path, self.source_se,
+                           self.target_se, wav_save_path)
+            wav, gen = tools.wav2lip_pre(wav_save_path, wav2lip_config, mel_step_size, self.full_frames,
+                                         self.face_det_results)
+            full_preds = []
+            for (img_batch, mel_batch, frames, coords) in gen:
+                pred = batch_eval(img_batch, mel_batch, self.wav2lip_model)
+                for p, f, c in zip(pred, frames, coords):
+                    y1, y2, x1, x2 = c
+                    p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
+                    f[y1:y2, x1:x2] = p
+                    full_preds.append(f)
+            clip_v = ImageSequenceClip(full_preds, fps=25)
+            clip_a = AudioArrayClip(wav, fps=44100)
+            clip_v.set_audio(clip_a)
+            clip_v.write_videofile()
 
         self.server = WSGIServer(('', self.config['web']['port']), app)
         self.server.serve_forever()

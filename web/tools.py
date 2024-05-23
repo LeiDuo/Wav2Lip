@@ -20,7 +20,7 @@ def text2wav(tts_model: TTS, converter: ToneColorConverter, text: str, tts_confi
 
 def wav2lip_pre(wav_save_path: str, wav2lip_config: dict, mel_step_size: int, full_frames: list,
                 face_det_results: list):
-    wav = audio.load_wav(wav_save_path, 44100)
+    wav = audio.load_wav(wav_save_path, 16000)
     mel = audio.melspectrogram(wav)
     print(mel.shape)
     if np.isnan(mel.reshape(-1)).sum() > 0:

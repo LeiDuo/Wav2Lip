@@ -1,7 +1,7 @@
 tts:
   speed: 0.8
   output_dir: results
-  reference_speaker: resources/example_reference.mp3
+  reference_speaker: resources/example_reference.wav
   ckpt_speakers: checkpoints/tts/base_speakers/ses
   ckpt_converter: checkpoints/tts/converter
   ckpt_tts: checkpoints/tts
